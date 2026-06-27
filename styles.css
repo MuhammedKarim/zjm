@@ -1,0 +1,51 @@
+html,
+body {
+  cursor: none;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: url('background.jpg') no-repeat center center fixed;
+  background-size: cover;
+}
+
+#idle-frame {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  z-index: 1;
+  background: #000;
+}
+
+#blank-layer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 5;
+  display: none;
+}
+
+#kalimat-image {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 10;
+  display: none;
+}
+
+#dim-overlay {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  z-index: 20;
+  display: none;
+}
