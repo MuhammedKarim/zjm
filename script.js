@@ -1,13 +1,21 @@
 const API_URL = 'https://live-status.muhammedkarim.workers.dev/';
+const DZP_API_URL = 'https://sufi.org.uk/live-dzp';
+
 const IDLE_IFRAME_URL = 'https://wali-app.co.uk/mosque/zjm';
 
 const KALIMAT_FOLDER = 'kalimat';
 const KALIMAT_EXTENSION = 'jpg';
 
-const STATUS_POLL_MS = 2000;
+const LIVE_CHECK_MS = 5000;
+const KALIMAT_POLL_MS = 1000;
+const DZP_POLL_MS = 60000;
 const VERSION_POLL_MS = 60000;
 
+const PRE_EVENING_BLANK_MINUTES = 20;
+
 const DIM_ON_BLANK = true;
+
+const DIM_ON_PRE_EVENING_BLANK = false;
 
 const idleFrame = document.getElementById('idle-frame');
 const blankLayer = document.getElementById('blank-layer');
@@ -17,6 +25,8 @@ const kalimatImage = document.getElementById('kalimat-image');
 let currentKalimat = null;
 let currentMode = null;
 let currentVersion = null;
+let dzpSchedule = null;
+let kalimatInterval = null;
 
 idleFrame.src = IDLE_IFRAME_URL;
 
@@ -33,17 +43,25 @@ function showIdleMode() {
   kalimatImage.removeAttribute('src');
 }
 
-function showBlankLiveMode() {
-  if (currentMode === 'blank') return;
+function showBlankMode(modeName, showDim) {
+  if (currentMode === modeName) return;
 
-  currentMode = 'blank';
+  currentMode = modeName;
   currentKalimat = null;
 
   idleFrame.style.display = 'none';
   blankLayer.style.display = 'block';
-  dimOverlay.style.display = DIM_ON_BLANK ? 'block' : 'none';
+  dimOverlay.style.display = showDim ? 'block' : 'none';
   kalimatImage.style.display = 'none';
   kalimatImage.removeAttribute('src');
+}
+
+function showBlankLiveMode() {
+  showBlankMode('blank-live', DIM_ON_BLANK);
+}
+
+function showPreEveningBlankMode() {
+  showBlankMode('pre-evening-blank', DIM_ON_PRE_EVENING_BLANK);
 }
 
 function showKalimatMode(kalimatName) {
@@ -67,8 +85,8 @@ function showKalimatMode(kalimatName) {
 
     idleFrame.style.display = 'none';
     blankLayer.style.display = 'none';
-    dimOverlay.style.display = 'block';
     kalimatImage.style.display = 'block';
+    dimOverlay.style.display = 'block';
   };
 
   testImage.onerror = () => {
@@ -90,28 +108,137 @@ function normaliseKalimatName(status) {
   return kalimat;
 }
 
-function fetchDisplayStatus() {
+function handleLiveStatus(status) {
+  if (!status || !status.isLive) {
+    stopKalimatPolling();
+    updateNonLiveDisplay();
+    return;
+  }
+
+  const kalimatName = normaliseKalimatName(status);
+
+  if (!kalimatName) {
+    showBlankLiveMode();
+    return;
+  }
+
+  showKalimatMode(kalimatName);
+}
+
+function checkLiveStatus() {
   fetch(`${API_URL}?t=${Date.now()}`)
     .then(res => res.json())
     .then(status => {
-      if (!status.isLive) {
-        showIdleMode();
-        return;
+      if (status.isLive) {
+        startKalimatPolling(status);
+      } else {
+        stopKalimatPolling();
+        updateNonLiveDisplay();
       }
-
-      const kalimatName = normaliseKalimatName(status);
-
-      if (!kalimatName) {
-        showBlankLiveMode();
-        return;
-      }
-
-      showKalimatMode(kalimatName);
     })
     .catch(err => {
       console.error('Failed to fetch live status:', err);
-      showIdleMode();
+      stopKalimatPolling();
+      updateNonLiveDisplay();
     });
+}
+
+function startKalimatPolling(initialStatus) {
+  if (initialStatus) {
+    handleLiveStatus(initialStatus);
+  } else {
+    fetchKalimatStatus();
+  }
+
+  if (!kalimatInterval) {
+    kalimatInterval = setInterval(fetchKalimatStatus, KALIMAT_POLL_MS);
+  }
+}
+
+function stopKalimatPolling() {
+  if (kalimatInterval) {
+    clearInterval(kalimatInterval);
+    kalimatInterval = null;
+  }
+
+  currentKalimat = null;
+}
+
+function fetchKalimatStatus() {
+  fetch(`${API_URL}?t=${Date.now()}`)
+    .then(res => res.json())
+    .then(status => {
+      handleLiveStatus(status);
+    })
+    .catch(err => {
+      console.error('Failed to fetch Kalimat status:', err);
+    });
+}
+
+function fetchDzpSchedule() {
+  fetch(`${DZP_API_URL}?t=${Date.now()}`)
+    .then(res => res.json())
+    .then(data => {
+      dzpSchedule = data;
+      updateNonLiveDisplay();
+    })
+    .catch(err => {
+      console.warn('Failed to fetch DZP schedule:', err);
+      dzpSchedule = null;
+    });
+}
+
+function timeStringToTodayDate(timeString) {
+  if (!timeString) return null;
+
+  const parts = String(timeString).split(':');
+  if (parts.length !== 2) return null;
+
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+
+  if (
+    Number.isNaN(hours) ||
+    Number.isNaN(minutes) ||
+    hours < 0 ||
+    hours > 23 ||
+    minutes < 0 ||
+    minutes > 59
+  ) {
+    return null;
+  }
+
+  const date = new Date();
+  date.setHours(hours, minutes, 0, 0);
+
+  return date;
+}
+
+function shouldShowPreEveningBlank() {
+  if (!dzpSchedule || !dzpSchedule.today || !dzpSchedule.today.evening) {
+    return false;
+  }
+
+  const eveningTime = timeStringToTodayDate(dzpSchedule.today.evening);
+  if (!eveningTime) return false;
+
+  const now = new Date();
+
+  const blankStartTime = new Date(
+    eveningTime.getTime() - PRE_EVENING_BLANK_MINUTES * 60 * 1000
+  );
+
+  return now >= blankStartTime && now < eveningTime;
+}
+
+function updateNonLiveDisplay() {
+  if (kalimatInterval) return;
+
+  if (shouldShowPreEveningBlank()) {
+    showPreEveningBlankMode();
+  } else {
+    showIdleMode();
+  }
 }
 
 function checkVersionAndReload() {
@@ -129,8 +256,10 @@ function checkVersionAndReload() {
     });
 }
 
-fetchDisplayStatus();
+fetchDzpSchedule();
+checkLiveStatus();
 checkVersionAndReload();
 
-setInterval(fetchDisplayStatus, STATUS_POLL_MS);
+setInterval(checkLiveStatus, LIVE_CHECK_MS);
+setInterval(fetchDzpSchedule, DZP_POLL_MS);
 setInterval(checkVersionAndReload, VERSION_POLL_MS);
