@@ -28,9 +28,46 @@ let currentVersion = null;
 let dzpSchedule = null;
 let kalimatInterval = null;
 
+const LIVE_STATUS_URL = API_URL;
+let liveStatusRequest = null;
+let liveStatusCheckInProgress = false;
+let kalimatRequestInProgress = false;
+let consecutiveOfflineResponses = 0;
+let kalimatGeneration = 0;
+let kalimatImageRequestId = 0;
+let pendingKalimat = null;
+
+async function getValidLiveStatus() {
+  // Both pollers share an in-flight request; failures never become offline signals.
+  if (liveStatusRequest) return liveStatusRequest;
+  liveStatusRequest = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch(LIVE_STATUS_URL, { cache: 'no-store', signal: controller.signal });
+      if (!response.ok) throw new Error('Live-status HTTP ' + response.status);
+      const status = await response.json();
+      if (!status || typeof status.isLive !== 'boolean' ||
+          (status.isLive && (typeof status.kalimat !== 'string' || !status.kalimat.trim()))) {
+        throw new Error('Invalid live-status response');
+      }
+      return status;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+  try {
+    return await liveStatusRequest;
+  } finally {
+    liveStatusRequest = null;
+  }
+}
+
 idleFrame.src = IDLE_IFRAME_URL;
 
 function showIdleMode() {
+  kalimatImageRequestId++;
+  pendingKalimat = null;
   if (currentMode === 'idle') return;
 
   currentMode = 'idle';
@@ -44,6 +81,8 @@ function showIdleMode() {
 }
 
 function showBlankMode(modeName, showDim) {
+  kalimatImageRequestId++;
+  pendingKalimat = null;
   if (currentMode === modeName) return;
 
   currentMode = modeName;
@@ -70,14 +109,21 @@ function showKalimatMode(kalimatName) {
     return;
   }
 
+  if (pendingKalimat === kalimatName) return;
+  const generation = kalimatGeneration;
+  const imageRequestId = ++kalimatImageRequestId;
   if (currentMode === 'kalimat' && currentKalimat === kalimatName) {
+    pendingKalimat = null;
     return;
   }
 
   const timestampedUrl = `${KALIMAT_FOLDER}/${encodeURIComponent(kalimatName)}.${KALIMAT_EXTENSION}?t=${Date.now()}`;
+  pendingKalimat = kalimatName;
   const testImage = new Image();
 
   testImage.onload = () => {
+    if (!kalimatInterval || generation !== kalimatGeneration || imageRequestId !== kalimatImageRequestId) return;
+    pendingKalimat = null;
     currentMode = 'kalimat';
     currentKalimat = kalimatName;
 
@@ -90,8 +136,9 @@ function showKalimatMode(kalimatName) {
   };
 
   testImage.onerror = () => {
+    if (imageRequestId === kalimatImageRequestId) pendingKalimat = null;
     console.warn(`Kalimat image not found: ${timestampedUrl}`);
-    showBlankLiveMode();
+    // Retain the last valid display when an image is missing.
   };
 
   testImage.src = timestampedUrl;
@@ -109,70 +156,68 @@ function normaliseKalimatName(status) {
 }
 
 function handleLiveStatus(status) {
-  if (!status || !status.isLive) {
-    stopKalimatPolling();
-    updateNonLiveDisplay();
+  // Blank after dua explicitly returns to the embedded prayer timetable.
+  if (status.kalimat.toLowerCase() === 'blank' && (currentKalimat === 'Dua' || currentKalimat === '')) {
+    showIdleMode();
+    currentKalimat = '';
     return;
   }
-
   const kalimatName = normaliseKalimatName(status);
-
   if (!kalimatName) {
     showBlankLiveMode();
     return;
   }
-
   showKalimatMode(kalimatName);
 }
 
-function checkLiveStatus() {
-  fetch(`${API_URL}?t=${Date.now()}`)
-    .then(res => res.json())
-    .then(status => {
-      if (status.isLive) {
-        startKalimatPolling(status);
-      } else {
-        stopKalimatPolling();
-        updateNonLiveDisplay();
-      }
-    })
-    .catch(err => {
-      console.error('Failed to fetch live status:', err);
+async function checkLiveStatus() {
+  if (liveStatusCheckInProgress) return;
+  liveStatusCheckInProgress = true;
+  try {
+    const status = await getValidLiveStatus();
+    if (status.isLive) consecutiveOfflineResponses = 0;
+    else if (++consecutiveOfflineResponses < 2) return;
+    if (status.isLive) startKalimatPolling(status);
+    else {
       stopKalimatPolling();
       updateNonLiveDisplay();
-    });
+    }
+  } catch (err) {
+    console.error('Failed to fetch live status; keeping existing display:', err);
+  } finally {
+    liveStatusCheckInProgress = false;
+  }
 }
 
 function startKalimatPolling(initialStatus) {
-  if (initialStatus) {
-    handleLiveStatus(initialStatus);
-  } else {
-    fetchKalimatStatus();
-  }
-
-  if (!kalimatInterval) {
-    kalimatInterval = setInterval(fetchKalimatStatus, KALIMAT_POLL_MS);
-  }
+  if (!kalimatInterval) kalimatInterval = setInterval(fetchKalimatStatus, KALIMAT_POLL_MS);
+  if (initialStatus) handleLiveStatus(initialStatus);
+  else fetchKalimatStatus();
 }
 
 function stopKalimatPolling() {
-  if (kalimatInterval) {
-    clearInterval(kalimatInterval);
-    kalimatInterval = null;
-  }
-
+  if (!kalimatInterval) return;
+  clearInterval(kalimatInterval);
+  kalimatInterval = null;
+  kalimatGeneration++;
+  kalimatImageRequestId++;
+  pendingKalimat = null;
   currentKalimat = null;
 }
 
-function fetchKalimatStatus() {
-  fetch(`${API_URL}?t=${Date.now()}`)
-    .then(res => res.json())
-    .then(status => {
-      handleLiveStatus(status);
-    })
-    .catch(err => {
-      console.error('Failed to fetch Kalimat status:', err);
-    });
+async function fetchKalimatStatus() {
+  if (!kalimatInterval || kalimatRequestInProgress) return;
+  kalimatRequestInProgress = true;
+  const generation = kalimatGeneration;
+  try {
+    const status = await getValidLiveStatus();
+    if (!kalimatInterval || generation !== kalimatGeneration || !status.isLive) return;
+    handleLiveStatus(status);
+  } catch (err) {
+    console.error('Failed to fetch Kalimat; keeping existing display:', err);
+  } finally {
+    kalimatRequestInProgress = false;
+  }
 }
 
 function fetchDzpSchedule() {
@@ -182,7 +227,7 @@ function fetchDzpSchedule() {
       dzpSchedule = data;
       updateNonLiveDisplay();
     })
-    .catch(err => {
+    .catch (err => {
       console.warn('Failed to fetch DZP schedule:', err);
       dzpSchedule = null;
     });
@@ -251,7 +296,7 @@ function checkVersionAndReload() {
 
       currentVersion = data.version;
     })
-    .catch(err => {
+    .catch (err => {
       console.warn('Failed to fetch version.json:', err);
     });
 }
